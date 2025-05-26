@@ -33,7 +33,7 @@ const handleTodos = async (sock, msg) => {
             const participants = groupMetadata.participants.map(p => p.id); // Lista de IDs dos participantes
 
             // Mensagem inicial com menção a todos os participantes
-            const mensagemInicial = `📢j@${sender.split('@')[0]}.`;
+            const mensagemInicial = `📢Estamos disponiveisj@${sender.split('@')[0]}.`;
 
             // Envia a mensagem inicial com menções
             await sock.sendMessage(from, {
