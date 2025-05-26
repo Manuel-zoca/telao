@@ -19,6 +19,10 @@ const { handleMensagemPix } = require('./handlers/pixHandler');
 const { handleComprovanteFoto } = require('./handlers/handleComprovanteFoto');
 const { handleReaction } = require("./handlers/reactionHandler");
 
+// Adicione o Express
+const express = require('express');
+const app = express();
+
 async function iniciarBot(deviceName, authFolder) {
     console.log(`🟢 Iniciando o bot para o dispositivo: ${deviceName}...`);
 
@@ -188,13 +192,13 @@ Garantimos qualidade, rapidez e os melhores preços para você.
 // Inicia o bot
 iniciarBot("Dispositivo 1", "./auth1");
 
-// ➕ Adiciona servidor HTTP para o Render aceitar como Web Service
-const http = require("http");
+// ➕ Configura servidor HTTP com Express para manter vivo no Render
 const PORT = process.env.PORT || 3000;
 
-http.createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("✅ TopBot está rodando com sucesso no Render!");
-}).listen(PORT, () => {
+app.get('/', (req, res) => {
+    res.send('✅ TopBot está rodando com sucesso no Render!');
+});
+
+app.listen(PORT, () => {
     console.log(`🌐 Servidor HTTP iniciado na porta ${PORT}`);
 });
