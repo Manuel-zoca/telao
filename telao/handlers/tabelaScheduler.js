@@ -5,11 +5,11 @@ const { handleTabela } = require('./tabelaHandler');
 const gruposComHorarios = [
     {
         id: "120363252308434038@g.us",
-        horarios: ["09:00", "12:43", "15:20", "19:30"],
+        horarios: ["06:30", "12:43", "15:20", "19:30"],
     },
     {
         id: "120363417514741662@g.us",
-        horarios: ["09:10", "12:46", "15:25", "19:35"],
+        horarios: ["06:40", "12:46", "15:25", "19:35"],
     },
 ];
 
