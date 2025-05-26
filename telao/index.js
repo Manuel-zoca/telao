@@ -19,20 +19,41 @@ const { handleMensagemPix } = require('./handlers/pixHandler');
 const { handleComprovanteFoto } = require('./handlers/handleComprovanteFoto');
 const { handleReaction } = require("./handlers/reactionHandler");
 
-// Adicione o Express
+// Servidor HTTP
 const express = require('express');
 const app = express();
 
 async function iniciarBot(deviceName, authFolder) {
-    console.log(`🟢 Iniciando o bot para o dispositivo: ${deviceName}...`);
+    let authState;
+    let saveCreds;
 
-    const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+    // Tenta carregar sessão via AUTH_STATE (variável de ambiente)
+    if (process.env.AUTH_STATE) {
+        try {
+            const decoded = Buffer.from(process.env.AUTH_STATE, 'base64').toString('utf-8');
+            authState = JSON.parse(decoded);
+            console.log("[✅] Sessão carregada via AUTH_STATE");
+        } catch (err) {
+            console.error("[❌] Erro ao decodificar AUTH_STATE:", err.message);
+        }
+    }
+
+    // Usa MultiFileAuthState com Base64 ou local
+    const { state, saveCreds: save } = await useMultiFileAuthState(authFolder, authState ? {
+        creds: authState.creds,
+        keys: () => authState.keys
+    } : undefined);
+
+    saveCreds = save;
+
     const sock = makeWASocket({
-        auth: state,
+        auth: authState || state,
         printQRInTerminal: false,
         qrTimeout: 60_000,
         connectTimeoutMs: 60_000,
         keepAliveIntervalMs: 30_000,
+        version: [2, 3, 40],
+        browser: ['Baileys', 'Chrome', '12.0.0']
     });
 
     setInterval(() => {
@@ -49,7 +70,7 @@ async function iniciarBot(deviceName, authFolder) {
                 const base64Data = qrBase64.split(',')[1];
                 console.log(`📷 QR Code (base64 PNG) para ${deviceName}:\n`);
                 console.log(base64Data);
-                console.log("\n🔗 Cole essa string no https://base64.guru/converter/decode/image para gerar a imagem do QR.");
+                console.log("\n🔗 Cole essa string no https://base64.guru/converter/decode/image  para gerar a imagem do QR.");
             } catch (err) {
                 console.error("❌ Erro ao gerar QR Code base64:", err);
             }
@@ -65,14 +86,26 @@ async function iniciarBot(deviceName, authFolder) {
                 console.log(`🔄 Tentando reconectar o dispositivo ${deviceName} em 3 segundos...`);
                 setTimeout(() => iniciarBot(deviceName, authFolder), 3000);
             }
-        } else if (connection === "open") {
+        }
+
+        if (connection === "open") {
             console.log(`✅ Bot conectado com sucesso ao dispositivo: ${deviceName}`);
             iniciarAgendamento(sock);
-            console.log("Inicializado WA v" + require("@whiskeysockets/baileys").version);
+            console.log("Intialized WA v" + require("@whiskeysockets/baileys").version.join("."));
         }
     });
 
-    sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", async () => {
+        const sessionData = {
+            creds: sock.authState.creds,
+            keys: {}
+        };
+        const encodedSession = Buffer.from(JSON.stringify(sessionData)).toString('base64');
+        console.log("\n🔑 COPIE ISSO E COLE NO RENDER COMO VARIAVEL DE AMBIENTE AUTH_STATE:\n");
+        console.log(encodedSession);
+        console.log("\n⚠️ Depois disso, o bot NÃO vai pedir mais o QR.\n");
+        await saveCreds();
+    });
 
     sock.ev.on("messages.upsert", async ({ messages }) => {
         if (!messages || messages.length === 0) return;
@@ -86,16 +119,16 @@ async function iniciarBot(deviceName, authFolder) {
             msg.message?.text || ""
         );
 
-        if (msg.message?.imageMessage && from.endsWith("@g.us")) {
-            console.log("📸 [handleComprovanteFoto] Executando handler de comprovante por imagem...");
-            await handleComprovanteFoto(sock, msg);
-            console.log("✅ Handler de comprovante (handleComprovanteFoto) executado.");
-        }
-
         messageText = messageText.replace(/[\u200e\u200f\u2068\u2069]/g, '').trim();
         const messageContent = messageText.toLowerCase();
 
         try {
+            if (msg.message?.imageMessage && from.endsWith("@g.us")) {
+                console.log("📸 [handleComprovanteFoto] Executando handler de comprovante por imagem...");
+                await handleComprovanteFoto(sock, msg);
+                console.log("✅ Handler de comprovante (handleComprovanteFoto) executado.");
+            }
+
             console.log("💸 [handleMensagemPix] Verificando se é comprovativo PIX...");
             await handleMensagemPix(sock, msg);
 
@@ -143,7 +176,6 @@ async function iniciarBot(deviceName, authFolder) {
 
     sock.ev.on('messages.reaction', async reactions => {
         console.log("📥 Reação recebida:", reactions.length);
-        
         for (const reactionMsg of reactions) {
             console.log("📍 [handleReaction] Processando reação...");
             console.dir(reactionMsg, { depth: null });
@@ -189,14 +221,18 @@ Garantimos qualidade, rapidez e os melhores preços para você.
     return sock;
 }
 
-// Inicia o bot
+// Roda o bot
 iniciarBot("Dispositivo 1", "./auth1");
 
-// ➕ Configura servidor HTTP com Express para manter vivo no Render
+// ➕ Servidor HTTP para manter o Render acordado
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
     res.send('✅ TopBot está rodando com sucesso no Render!');
+});
+
+app.get('/ping', (req, res) => {
+    res.status(200).send('Pong!');
 });
 
 app.listen(PORT, () => {
