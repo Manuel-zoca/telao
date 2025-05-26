@@ -1,5 +1,5 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
-const QRCode = require("qrcode"); // substitui qrcode-terminal
+const QRCode = require("qrcode");
 const { Boom } = require("@hapi/boom");
 
 // Handlers
@@ -41,10 +41,7 @@ async function iniciarBot(deviceName, authFolder) {
         if (qr) {
             console.log(`📌 Escaneie o QR Code do dispositivo: ${deviceName}`);
             try {
-                // Gera base64 PNG do QR code e imprime no console
                 const qrBase64 = await QRCode.toDataURL(qr, { type: 'image/png' });
-                // A string vem no formato: data:image/png;base64,XXXXX
-                // Vamos imprimir só o base64 para você copiar no site
                 const base64Data = qrBase64.split(',')[1];
                 console.log(`📷 QR Code (base64 PNG) para ${deviceName}:\n`);
                 console.log(base64Data);
@@ -73,7 +70,6 @@ async function iniciarBot(deviceName, authFolder) {
 
     sock.ev.on("creds.update", saveCreds);
 
-    // 📩 Listener de mensagens recebidas
     sock.ev.on("messages.upsert", async ({ messages }) => {
         if (!messages || messages.length === 0) return;
 
@@ -86,14 +82,12 @@ async function iniciarBot(deviceName, authFolder) {
             msg.message?.text || ""
         );
 
-        // 📸 Verificação de imagem com comprovante em grupo
         if (msg.message?.imageMessage && from.endsWith("@g.us")) {
             console.log("📸 [handleComprovanteFoto] Executando handler de comprovante por imagem...");
             await handleComprovanteFoto(sock, msg);
             console.log("✅ Handler de comprovante (handleComprovanteFoto) executado.");
         }
 
-        // 🔤 Limpeza do texto
         messageText = messageText.replace(/[\u200e\u200f\u2068\u2069]/g, '').trim();
         const messageContent = messageText.toLowerCase();
 
@@ -101,12 +95,10 @@ async function iniciarBot(deviceName, authFolder) {
             console.log("💸 [handleMensagemPix] Verificando se é comprovativo PIX...");
             await handleMensagemPix(sock, msg);
 
-            // Logs adicionais
             if (messageContent.startsWith('@') || messageContent.startsWith('/')) {
                 console.log(`📥 Nova mensagem de ${from} no ${deviceName}: ${messageContent}`);
             }
 
-            // Comandos específicos
             if (messageContent === "@concorrentes") {
                 console.log("📍 [handleListar] Listando concorrentes...");
                 await handleListar(sock, msg);
@@ -145,18 +137,16 @@ async function iniciarBot(deviceName, authFolder) {
         }
     });
 
-    // ❤️ Listener de reações
     sock.ev.on('messages.reaction', async reactions => {
         console.log("📥 Reação recebida:", reactions.length);
         
         for (const reactionMsg of reactions) {
             console.log("📍 [handleReaction] Processando reação...");
-            console.dir(reactionMsg, { depth: null }); // 👈 Corrigido aqui!
+            console.dir(reactionMsg, { depth: null });
             await handleReaction({ reactionMessage: reactionMsg, sock });
         }
     });
 
-    // 👥 Novo participante no grupo
     sock.ev.on("group-participants.update", async (update) => {
         const { id, participants, action } = update;
 
@@ -195,5 +185,16 @@ Garantimos qualidade, rapidez e os melhores preços para você.
     return sock;
 }
 
-// Start the bot
+// Inicia o bot
 iniciarBot("Dispositivo 1", "./auth1");
+
+// ➕ Adiciona servidor HTTP para o Render aceitar como Web Service
+const http = require("http");
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("✅ TopBot está rodando com sucesso no Render!");
+}).listen(PORT, () => {
+    console.log(`🌐 Servidor HTTP iniciado na porta ${PORT}`);
+});
