@@ -1,7 +1,7 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
 const QRCode = require("qrcode");
 const { Boom } = require("@hapi/boom");
-const PQueue = require('p-queue'); // Para gerenciar a fila de mensagens
+import PQueue from 'p-queue'; // Para gerenciar a fila de mensagens
 
 // Handlers
 const { handleMessage } = require("./handlers/messageHandler");
