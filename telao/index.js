@@ -1,5 +1,5 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
-const qrcode = require("qrcode-terminal");
+const QRCode = require("qrcode"); // substitui qrcode-terminal
 const { Boom } = require("@hapi/boom");
 
 // Handlers
@@ -18,7 +18,6 @@ const { verificarEnvioTabela } = require('./handlers/tabelaScheduler');
 const { handleMensagemPix } = require('./handlers/pixHandler');
 const { handleComprovanteFoto } = require('./handlers/handleComprovanteFoto');
 const { handleReaction } = require("./handlers/reactionHandler");
-
 
 async function iniciarBot(deviceName, authFolder) {
     console.log(`🟢 Iniciando o bot para o dispositivo: ${deviceName}...`);
@@ -40,8 +39,19 @@ async function iniciarBot(deviceName, authFolder) {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            console.log(`📌 Escaneie o QR Code abaixo para conectar o dispositivo: ${deviceName}`);
-            qrcode.generate(qr, { small: true });
+            console.log(`📌 Escaneie o QR Code do dispositivo: ${deviceName}`);
+            try {
+                // Gera base64 PNG do QR code e imprime no console
+                const qrBase64 = await QRCode.toDataURL(qr, { type: 'image/png' });
+                // A string vem no formato: data:image/png;base64,XXXXX
+                // Vamos imprimir só o base64 para você copiar no site
+                const base64Data = qrBase64.split(',')[1];
+                console.log(`📷 QR Code (base64 PNG) para ${deviceName}:\n`);
+                console.log(base64Data);
+                console.log("\n🔗 Cole essa string no https://base64.guru/converter/decode/image para gerar a imagem do QR.");
+            } catch (err) {
+                console.error("❌ Erro ao gerar QR Code base64:", err);
+            }
         }
 
         if (connection === "close") {
@@ -135,16 +145,16 @@ async function iniciarBot(deviceName, authFolder) {
         }
     });
 
-// ❤️ Listener de reações
-sock.ev.on('messages.reaction', async reactions => {
-    console.log("📥 Reação recebida:", reactions.length);
-    
-    for (const reactionMsg of reactions) {
-        console.log("📍 [handleReaction] Processando reação...");
-        console.dir(reactionMsg, { depth: null }); // 👈 Corrigido aqui!
-        await handleReaction({ reactionMessage: reactionMsg, sock });
-    }
-});
+    // ❤️ Listener de reações
+    sock.ev.on('messages.reaction', async reactions => {
+        console.log("📥 Reação recebida:", reactions.length);
+        
+        for (const reactionMsg of reactions) {
+            console.log("📍 [handleReaction] Processando reação...");
+            console.dir(reactionMsg, { depth: null }); // 👈 Corrigido aqui!
+            await handleReaction({ reactionMessage: reactionMsg, sock });
+        }
+    });
 
     // 👥 Novo participante no grupo
     sock.ev.on("group-participants.update", async (update) => {
@@ -175,15 +185,15 @@ Garantimos qualidade, rapidez e os melhores preços para você.
                     } else {
                         await sock.sendMessage(id, { text: mensagem, mentions: [participant] });
                     }
-                } catch (error) {
-                    console.log("❌ Erro ao enviar mensagem de boas-vindas:", error);
+                } catch (err) {
+                    console.error("❌ Erro ao enviar mensagem de boas-vindas:", err);
                 }
             }
         }
     });
 
-    console.log(`🟢 Bot iniciado para o dispositivo ${deviceName} e aguardando eventos...`);
+    return sock;
 }
 
-// Inicia o bot para o dispositivo 2
-iniciarBot("Dispositivo 2", "auth_info_device2");
+// Start the bot
+iniciarBot("Dispositivo 1", "./auth1");
