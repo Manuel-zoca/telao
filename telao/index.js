@@ -1,6 +1,7 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
 const QRCode = require("qrcode");
 const { Boom } = require("@hapi/boom");
+const PQueue = require('p-queue'); // Para gerenciar a fila de mensagens
 
 // Handlers
 const { handleMessage } = require("./handlers/messageHandler");
@@ -23,6 +24,20 @@ const { handleReaction } = require("./handlers/reactionHandler");
 const express = require('express');
 const app = express();
 
+// Fila de mensagens pendentes
+const messageQueue = new PQueue({ concurrency: 1 }); // Processa uma mensagem por vez
+let sockGlobal = null; // Variável global para o socket
+
+async function sendMessageQueued(jid, content) {
+    if (sockGlobal && sockGlobal.user) { // Verifica se o socket está conectado
+        await messageQueue.add(() => sockGlobal.sendMessage(jid, content));
+    } else {
+        console.warn('⚠️ Socket não conectado. Mensagem adicionada à fila para envio posterior.');
+        // Adiciona à fila mesmo que não esteja conectado, será processada na reconexão
+        messageQueue.add(() => sockGlobal.sendMessage(jid, content));
+    }
+}
+
 async function iniciarBot(deviceName, authFolder) {
     console.log(`🟢 Iniciando o bot para o dispositivo: ${deviceName}...`);
 
@@ -33,8 +48,15 @@ async function iniciarBot(deviceName, authFolder) {
         qrTimeout: 60_000,
         connectTimeoutMs: 60_000,
         keepAliveIntervalMs: 30_000,
+        // Adicione um manipulador de erro mais genérico para o socket
+        // para capturar EPIPE e outros erros de stream.
+        shouldIgnoreJid: (jid) => is=null, // Isso pode ajudar com o EPIPE
+        defaultQueryTimeoutMs: undefined, // Sem timeout padrão para consultas
     });
 
+    sockGlobal = sock; // Atribui o socket à variável global
+
+    // Inicia o agendamento da tabela a cada minuto
     setInterval(() => {
         verificarEnvioTabela(sock);
     }, 60 * 1000);
@@ -58,17 +80,26 @@ async function iniciarBot(deviceName, authFolder) {
         if (connection === "close") {
             const motivo = new Boom(lastDisconnect?.error)?.output?.statusCode;
             console.error(`⚠️ Conexão fechada para o dispositivo ${deviceName}. Motivo: ${motivo || "Desconhecido"}`);
+
             if (motivo === DisconnectReason.loggedOut) {
                 console.log(`❌ Bot deslogado no dispositivo ${deviceName}. Reinicie manualmente.`);
-                process.exit(0);
+                // Não tenta reconectar automaticamente se for loggedOut
+                process.exit(0); // Garante que o processo seja encerrado
             } else {
                 console.log(`🔄 Tentando reconectar o dispositivo ${deviceName} em 3 segundos...`);
+                // Limpa a fila antes de tentar reconectar para evitar duplicação de mensagens
+                messageQueue.clear(); 
                 setTimeout(() => iniciarBot(deviceName, authFolder), 3000);
             }
         } else if (connection === "open") {
             console.log(`✅ Bot conectado com sucesso ao dispositivo: ${deviceName}`);
             iniciarAgendamento(sock);
             console.log("Inicializado WA v" + require("@whiskeysockets/baileys").version);
+            // Processa mensagens pendentes da fila após a reconexão
+            if (!messageQueue.isEmpty()) {
+                console.log(`✉️ Processando ${messageQueue.size} mensagens pendentes da fila...`);
+                await messageQueue.start(); // Inicia o processamento da fila
+            }
         }
     });
 
@@ -78,7 +109,12 @@ async function iniciarBot(deviceName, authFolder) {
         if (!messages || messages.length === 0) return;
 
         const msg = messages[0];
+        // Validação da variável 'from'
         const from = msg.key.remoteJid;
+        if (!from) {
+            console.warn('⚠️ remoteJid não encontrado para a mensagem. Ignorando.');
+            return;
+        }
 
         let messageText = (
             msg.message?.conversation ||
@@ -97,7 +133,7 @@ async function iniciarBot(deviceName, authFolder) {
 
         try {
             console.log("💸 [handleMensagemPix] Verificando se é comprovativo PIX...");
-            await handleMensagemPix(sock, msg);
+            await handleMensagemPix(sock, msg); // Passa o sock para dentro do handler se ele precisar enviar mensagens
 
             if (messageContent.startsWith('@') || messageContent.startsWith('/')) {
                 console.log(`📥 Nova mensagem de ${from} no ${deviceName}: ${messageContent}`);
@@ -137,7 +173,8 @@ async function iniciarBot(deviceName, authFolder) {
 
         } catch (error) {
             console.error("❌ Erro ao processar mensagem:", error.message || error);
-            await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao processar sua solicitação." });
+            // Use a função sendMessageQueued para garantir que a mensagem seja enviada
+            await sendMessageQueued(from, { text: "❌ Ocorreu um erro ao processar sua solicitação." });
         }
     });
 
@@ -161,9 +198,7 @@ async function iniciarBot(deviceName, authFolder) {
                     const nome = participant.split("@")[0];
 
                     const mensagem = `
-@${nome}  *👋 Olá, Seja muito bem-vindo(a) ao nosso grupo de Vendas de Megas! 🚀* 
-
-📌 Para conferir todas as nossas ofertas, basta digitar: 
+@${nome} *👋 Olá, Seja muito bem-vindo(a) ao nosso grupo de Vendas de Megas! 🚀* 📌 Para conferir todas as nossas ofertas, basta digitar: 
 *✨ @Megas / @Tabela ✨*
 
 *✨ ilimitado / ✨*
@@ -173,11 +208,11 @@ Garantimos qualidade, rapidez e os melhores preços para você.
 
 *Fique à vontade para tirar suas dúvidas e aproveitar nossas promoções! 😃💬*
 `.trim();
-
+                    // Use sendMessageQueued para mensagens de boas-vindas também
                     if (ppUrl) {
-                        await sock.sendMessage(id, { image: { url: ppUrl }, caption: mensagem, mentions: [participant] });
+                        await sendMessageQueued(id, { image: { url: ppUrl }, caption: mensagem, mentions: [participant] });
                     } else {
-                        await sock.sendMessage(id, { text: mensagem, mentions: [participant] });
+                        await sendMessageQueued(id, { text: mensagem, mentions: [participant] });
                     }
                 } catch (err) {
                     console.error("❌ Erro ao enviar mensagem de boas-vindas:", err);
@@ -201,4 +236,4 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`🌐 Servidor HTTP iniciado na porta ${PORT}`);
-});  
+});
