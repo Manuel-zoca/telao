@@ -1,221 +1,207 @@
-const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
+const {
+    makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion
+} = require("@whiskeysockets/baileys");
 const QRCode = require("qrcode");
 const { Boom } = require("@hapi/boom");
-import PQueue from 'p-queue'; // Para gerenciar a fila de mensagens
-
-// Handlers
-const { handleMessage } = require("./handlers/messageHandler");
-const { handleConcorrer } = require("./handlers/concorrerHandler");
-const { handleListar } = require("./handlers/listarHandler");
-const { handleRemove } = require("./handlers/removeHandler");
-const { handlePagamento } = require("./handlers/pagamentoHandler");
-const { handleGrupo } = require("./handlers/grupoHandler");
-const { handleBan } = require("./handlers/banHandler");
-const { handleCompra } = require("./handlers/compraHandler");
-const { handleTabela } = require("./handlers/tabelaHandler");
-const { handleTodos } = require("./handlers/todosHandler");
-const { iniciarAgendamento } = require("./handlers/grupoSchedulerHandler");
-const { verificarEnvioTabela } = require('./handlers/tabelaScheduler');
-const { handleMensagemPix } = require('./handlers/pixHandler');
-const { handleComprovanteFoto } = require('./handlers/handleComprovanteFoto');
-const { handleReaction } = require("./handlers/reactionHandler");
-
-// Adicione o Express
-const express = require('express');
+const fs = require("fs");
+const express = require("express");
 const app = express();
 
-// Fila de mensagens pendentes
-const messageQueue = new PQueue({ concurrency: 1 }); // Processa uma mensagem por vez
-let sockGlobal = null; // Variável global para o socket
+const { loadAuthState, saveAuthState } = require("./db");
+const handleMessage = require("./handlers/messageHandler");
+const handleConcorrer = require("./handlers/concorrerHandler");
+const handleListar = require("./handlers/listarHandler");
+const handleRemove = require("./handlers/removeHandler");
+const handlePagamento = require("./handlers/pagamentoHandler");
+const handleGrupo = require("./handlers/grupoHandler");
+const handleBan = require("./handlers/banHandler");
+const handleCompra = require("./handlers/compraHandler");
+const handleTabela = require("./handlers/tabelaHandler");
+const handleTodos = require("./handlers/todosHandler");
+const { iniciarAgendamento } = require("./handlers/grupoSchedulerHandler");
+const { verificarEnvioTabela } = require("./handlers/tabelaScheduler");
+const { handleMensagemPix } = require("./handlers/pixHandler");
+const { handleComprovanteFoto } = require("./handlers/handleComprovanteFoto");
+const { handleReaction } = require("./handlers/reactionHandler");
 
-async function sendMessageQueued(jid, content) {
-    if (sockGlobal && sockGlobal.user) { // Verifica se o socket está conectado
-        await messageQueue.add(() => sockGlobal.sendMessage(jid, content));
+let pendingMessages = [];
+
+async function iniciarBot(deviceName) {
+    console.log(`🟢 [${deviceName}] Iniciando bot...`);
+
+    // Carregando estado salvo no MongoDB (não está sendo usado diretamente aqui porque você usa multi-file auth)
+    const mongoState = await loadAuthState();
+    if (mongoState) {
+        console.log(`🟡 [${deviceName}] Estado auth carregado do MongoDB (não utilizado diretamente pois auth multi-file será usado)`);
     } else {
-        console.warn('⚠️ Socket não conectado. Mensagem adicionada à fila para envio posterior.');
-        // Adiciona à fila mesmo que não esteja conectado, será processada na reconexão
-        messageQueue.add(() => sockGlobal.sendMessage(jid, content));
+        console.log(`🟡 [${deviceName}] Nenhum estado auth encontrado no MongoDB`);
     }
-}
 
-async function iniciarBot(deviceName, authFolder) {
-    console.log(`🟢 Iniciando o bot para o dispositivo: ${deviceName}...`);
+    const authFolder = './auth1'; // pasta para salvar credenciais multi-file
+    fs.mkdirSync(authFolder, { recursive: true }); // garante que pasta exista
+    console.log(`🟢 [${deviceName}] Diretório de auth '${authFolder}' garantido.`);
 
+    // Inicializando Baileys com multi-file auth
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
-    const sock = makeWASocket({
+    console.log(`🟢 [${deviceName}] Estado de autenticação multi-file carregado.`);
+
+    // Pegando versão mais recente do WhatsApp Web para o Baileys
+    const { version } = await fetchLatestBaileysVersion();
+    console.log(`🟢 [${deviceName}] Versão Baileys para WA: ${version.join('.')}`);
+
+    // Criando socket com configuração
+    let sock = makeWASocket({
+        version,
         auth: state,
-        printQRInTerminal: false,
-        qrTimeout: 60_000,
-        connectTimeoutMs: 60_000,
-        keepAliveIntervalMs: 30_000,
-        // Adicione um manipulador de erro mais genérico para o socket
-        // para capturar EPIPE e outros erros de stream.
-        shouldIgnoreJid: (jid) => is=null, // Isso pode ajudar com o EPIPE
-        defaultQueryTimeoutMs: undefined, // Sem timeout padrão para consultas
+        printQRInTerminal: false // QR no console é customizado via qrcode pacote
     });
 
-    sockGlobal = sock; // Atribui o socket à variável global
-
-    // Inicia o agendamento da tabela a cada minuto
+    // Agendamento periódicos, ex: verificar envio tabela
     setInterval(() => {
+        console.log(`🕒 [${deviceName}] Rodando verificação de envio da tabela...`);
         verificarEnvioTabela(sock);
     }, 60 * 1000);
 
+    // Eventos de conexão
     sock.ev.on("connection.update", async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            console.log(`📌 Escaneie o QR Code do dispositivo: ${deviceName}`);
-            try {
-                const qrBase64 = await QRCode.toDataURL(qr, { type: 'image/png' });
-                const base64Data = qrBase64.split(',')[1];
-                console.log(`📷 QR Code (base64 PNG) para ${deviceName}:\n`);
-                console.log(base64Data);
-                console.log("\n🔗 Cole essa string no https://base64.guru/converter/decode/image para gerar a imagem do QR.");
-            } catch (err) {
-                console.error("❌ Erro ao gerar QR Code base64:", err);
-            }
+            // Gerar QR Code no terminal como base64 para visualização (você pode alterar para qrcode-terminal)
+            const qrBase64 = await QRCode.toDataURL(qr);
+            console.log(`📌 [${deviceName}] Escaneie o QR Code para autenticar:`);
+            console.log(qrBase64.split(',')[1]);
         }
 
         if (connection === "close") {
             const motivo = new Boom(lastDisconnect?.error)?.output?.statusCode;
-            console.error(`⚠️ Conexão fechada para o dispositivo ${deviceName}. Motivo: ${motivo || "Desconhecido"}`);
+            console.log(`🔴 [${deviceName}] Conexão fechada, motivo: ${motivo}`);
 
             if (motivo === DisconnectReason.loggedOut) {
-                console.log(`❌ Bot deslogado no dispositivo ${deviceName}. Reinicie manualmente.`);
-                // Não tenta reconectar automaticamente se for loggedOut
-                process.exit(0); // Garante que o processo seja encerrado
-            } else {
-                console.log(`🔄 Tentando reconectar o dispositivo ${deviceName} em 3 segundos...`);
-                // Limpa a fila antes de tentar reconectar para evitar duplicação de mensagens
-                messageQueue.clear(); 
-                setTimeout(() => iniciarBot(deviceName, authFolder), 3000);
+                console.log(`❌ [${deviceName}] Sessão deslogada. Encerrando processo.`);
+                process.exit(0);
             }
-        } else if (connection === "open") {
-            console.log(`✅ Bot conectado com sucesso ao dispositivo: ${deviceName}`);
+
+            console.log(`🔁 [${deviceName}] Tentando reconectar em 3 segundos...`);
+            setTimeout(() => iniciarBot(deviceName), 3000);
+        }
+
+        if (connection === "open") {
+            console.log(`✅ [${deviceName}] Conectado com sucesso!`);
             iniciarAgendamento(sock);
-            console.log("Inicializado WA v" + require("@whiskeysockets/baileys").version);
-            // Processa mensagens pendentes da fila após a reconexão
-            if (!messageQueue.isEmpty()) {
-                console.log(`✉️ Processando ${messageQueue.size} mensagens pendentes da fila...`);
-                await messageQueue.start(); // Inicia o processamento da fila
+
+            if (pendingMessages.length > 0) {
+                console.log(`📤 [${deviceName}] Enviando ${pendingMessages.length} mensagens pendentes...`);
+                await Promise.all(pendingMessages.map(({ jid, msg }) => sock.sendMessage(jid, msg)));
+                pendingMessages = [];
             }
         }
     });
 
-    sock.ev.on("creds.update", saveCreds);
+    // Evento para salvar credenciais automaticamente no multi-file
+    sock.ev.on("creds.update", async () => {
+        await saveCreds();
+        console.log(`💾 [${deviceName}] Credenciais atualizadas e salvas no multi-file.`);
+    });
 
+    // Manipulação de mensagens recebidas
     sock.ev.on("messages.upsert", async ({ messages }) => {
         if (!messages || messages.length === 0) return;
 
         const msg = messages[0];
-        // Validação da variável 'from'
-        const from = msg.key.remoteJid;
-        if (!from) {
-            console.warn('⚠️ remoteJid não encontrado para a mensagem. Ignorando.');
-            return;
-        }
+        const senderJid = msg.key.remoteJid;
 
-        let messageText = (
+        // Extrai texto da mensagem de forma segura
+        const messageText = (
             msg.message?.conversation ||
             msg.message?.extendedTextMessage?.text ||
-            msg.message?.text || ""
-        );
+            msg.message?.text ||
+            ""
+        ).replace(/[\u200e\u200f\u2068\u2069]/g, '').trim();
 
-        if (msg.message?.imageMessage && from.endsWith("@g.us")) {
-            console.log("📸 [handleComprovanteFoto] Executando handler de comprovante por imagem...");
-            await handleComprovanteFoto(sock, msg);
-            console.log("✅ Handler de comprovante (handleComprovanteFoto) executado.");
-        }
-
-        messageText = messageText.replace(/[\u200e\u200f\u2068\u2069]/g, '').trim();
-        const messageContent = messageText.toLowerCase();
+        const lowerText = messageText.toLowerCase();
 
         try {
-            console.log("💸 [handleMensagemPix] Verificando se é comprovativo PIX...");
-            await handleMensagemPix(sock, msg); // Passa o sock para dentro do handler se ele precisar enviar mensagens
-
-            if (messageContent.startsWith('@') || messageContent.startsWith('/')) {
-                console.log(`📥 Nova mensagem de ${from} no ${deviceName}: ${messageContent}`);
+            if (msg.message?.imageMessage && senderJid.endsWith("@g.us")) {
+                console.log(`🖼️ [${deviceName}] Mensagem com foto em grupo detectada.`);
+                await handleComprovanteFoto(sock, msg);
             }
 
-            if (messageContent === "@concorrentes") {
-                console.log("📍 [handleListar] Listando concorrentes...");
+            await handleMensagemPix(sock, msg);
+
+            if (lowerText.startsWith('@') || lowerText.startsWith('/')) {
+                console.log(`📨 [${deviceName}] Comando recebido de ${senderJid}: ${lowerText}`);
+            }
+
+            // Roteamento de comandos (você pode ajustar conforme sua lógica)
+            if (lowerText === "@concorrentes") {
                 await handleListar(sock, msg);
-            } else if (messageContent.startsWith('@remove') || messageContent.startsWith('/remove')) {
-                console.log("📍 [handleRemove] Executando remoção...");
+            } else if (lowerText.startsWith("@remove") || lowerText.startsWith("/remove")) {
                 await handleRemove(sock, msg);
-            } else if (messageContent.startsWith('@ban') || messageContent.startsWith('/ban')) {
-                console.log("📍 [handleBan] Executando banimento...");
+            } else if (lowerText.startsWith("@ban") || lowerText.startsWith("/ban")) {
                 await handleBan(sock, msg);
-            } else if (messageContent === "@pagamentos") {
-                console.log("📍 [handlePagamento] Exibindo lista de pagamentos...");
+            } else if (lowerText === "@pagamentos") {
                 await handlePagamento(sock, msg);
-            } else if (messageContent === "@grupo on" || messageContent === "@grupo off") {
-                console.log("📍 [handleGrupo] Alterando status do grupo...");
+            } else if (["@grupo on", "@grupo off"].includes(lowerText)) {
                 await handleGrupo(sock, msg);
-            } else if (messageContent.startsWith("@compra") || messageContent.startsWith("@rentanas") || messageContent.startsWith("@remove rentanas")) {
-                console.log("📍 [handleCompra] Executando compra...");
+            } else if (lowerText.startsWith("@compra") || lowerText.startsWith("@rentanas") || lowerText.startsWith("@remove rentanas")) {
                 await handleCompra(sock, msg);
-            } else if (from.endsWith("@g.us") && messageContent === "@concorrencia") {
-                console.log("📍 [handleConcorrer] Lidando com concorrência...");
+            } else if (senderJid.endsWith("@g.us") && lowerText === "@concorrencia") {
                 await handleConcorrer(sock, msg);
-            } else if (messageContent === "@tabela") {
-                console.log("📍 [handleTabela] Exibindo tabela...");
+            } else if (lowerText === "@tabela") {
                 await handleTabela(sock, msg);
-            } else if (messageContent === "@todos") {
-                console.log("📍 [handleTodos] Chamando todos...");
+            } else if (lowerText === "@todos") {
                 await handleTodos(sock, msg);
-            } else if (messageContent.startsWith('@') || messageContent.startsWith('/')) {
-                console.log("📍 [handleMessage] Comando genérico...");
+            } else if (lowerText.startsWith('@') || lowerText.startsWith('/')) {
                 await handleMessage(sock, msg);
             }
 
         } catch (error) {
-            console.error("❌ Erro ao processar mensagem:", error.message || error);
-            // Use a função sendMessageQueued para garantir que a mensagem seja enviada
-            await sendMessageQueued(from, { text: "❌ Ocorreu um erro ao processar sua solicitação." });
+            console.error(`❌ [${deviceName}] Erro ao processar mensagem de ${senderJid}:`, error.message);
+            try {
+                await sock.sendMessage(senderJid, { text: "❌ Erro ao processar sua solicitação." });
+            } catch {
+                pendingMessages.push({ jid: senderJid, msg: { text: "❌ Erro ao processar sua solicitação." } });
+                console.log(`⚠️ [${deviceName}] Mensagem de erro adicionada na fila para envio posterior.`);
+            }
         }
     });
 
-    sock.ev.on('messages.reaction', async reactions => {
-        console.log("📥 Reação recebida:", reactions.length);
-        
-        for (const reactionMsg of reactions) {
-            console.log("📍 [handleReaction] Processando reação...");
-            console.dir(reactionMsg, { depth: null });
-            await handleReaction({ reactionMessage: reactionMsg, sock });
+    // Reações em mensagens
+    sock.ev.on("messages.reaction", async reactions => {
+        for (const reaction of reactions) {
+            console.log(`🔄 [${deviceName}] Reação recebida:`, reaction);
+            await handleReaction({ reactionMessage: reaction, sock });
         }
     });
 
-    sock.ev.on("group-participants.update", async (update) => {
-        const { id, participants, action } = update;
-
+    // Boas-vindas para novos participantes em grupos
+    sock.ev.on("group-participants.update", async ({ id, participants, action }) => {
         if (action === "add") {
-            for (let participant of participants) {
+            for (const participant of participants) {
+                const nome = participant.split("@")[0];
+                const mensagem = `
+@${nome} *👋 Bem-vindo(a) ao grupo!*
+
+📌 Para ofertas: *@Megas / @Tabela*
+🎉 Já são +3.796 clientes felizes com nossos serviços!
+
+Qualquer dúvida, estamos à disposição!
+                `.trim();
+
                 try {
                     const ppUrl = await sock.profilePictureUrl(participant, "image").catch(() => null);
-                    const nome = participant.split("@")[0];
-
-                    const mensagem = `
-@${nome} *👋 Olá, Seja muito bem-vindo(a) ao nosso grupo de Vendas de Megas! 🚀* 📌 Para conferir todas as nossas ofertas, basta digitar: 
-*✨ @Megas / @Tabela ✨*
-
-*✨ ilimitado / ✨*
-
-🎉 Já são mais de 3.796 clientes satisfeitos com nossos serviços! 
-Garantimos qualidade, rapidez e os melhores preços para você.
-
-*Fique à vontade para tirar suas dúvidas e aproveitar nossas promoções! 😃💬*
-`.trim();
-                    // Use sendMessageQueued para mensagens de boas-vindas também
                     if (ppUrl) {
-                        await sendMessageQueued(id, { image: { url: ppUrl }, caption: mensagem, mentions: [participant] });
+                        await sock.sendMessage(id, { image: { url: ppUrl }, caption: mensagem, mentions: [participant] });
                     } else {
-                        await sendMessageQueued(id, { text: mensagem, mentions: [participant] });
+                        await sock.sendMessage(id, { text: mensagem, mentions: [participant] });
                     }
+                    console.log(`👋 [${deviceName}] Mensagem de boas-vindas enviada para ${participant} no grupo ${id}`);
                 } catch (err) {
-                    console.error("❌ Erro ao enviar mensagem de boas-vindas:", err);
+                    console.error(`❌ [${deviceName}] Erro ao enviar boas-vindas para ${participant}:`, err.message);
                 }
             }
         }
@@ -224,16 +210,16 @@ Garantimos qualidade, rapidez e os melhores preços para você.
     return sock;
 }
 
-// Inicia o bot
-iniciarBot("Dispositivo 1", "./auth1");
+(async () => {
+    try {
+        await iniciarBot("Dispositivo 1");
+    } catch (error) {
+        console.error("❌ Erro fatal ao iniciar o bot:", error);
+        process.exit(1);
+    }
+})();
 
-// ➕ Configura servidor HTTP com Express para manter vivo no Render
+// Servidor HTTP para manter o bot vivo e responder status básico
 const PORT = process.env.PORT || 3000;
-
-app.get('/', (req, res) => {
-    res.send('✅ TopBot está rodando com sucesso no Render!');
-});
-
-app.listen(PORT, () => {
-    console.log(`🌐 Servidor HTTP iniciado na porta ${PORT}`);
-});
+app.get('/', (_, res) => res.send('✅ TopBot rodando com sucesso!'));
+app.listen(PORT, () => console.log(`🌐 HTTP ativo na porta ${PORT}`));
